@@ -28,6 +28,7 @@ def main():
 
     if args.run_type == 0 or args.run_type == 1 and args.pretrained == False:
         write_settings_to_file(args)
+    args.pretrained = True
     processor = Processor(args)
     processor.processing()
 

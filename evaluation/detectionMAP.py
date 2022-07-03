@@ -7,6 +7,7 @@ import scipy.io as sio
 import utils.utils as utils
 
 
+
 def str2ind(categoryname, classlist):
     return [i for i in range(len(classlist)) if categoryname == classlist[i]][0]
 
@@ -25,15 +26,28 @@ def filter_segments(segment_predict, videonames, ambilist, factor):
     s = [segment_predict[i, :] for i in range(np.shape(segment_predict)[0]) if ind[i] == 0]
     return np.array(s)
 
+def compute_gt_list(segments,labels,classlist,pred):
+    gt_labels = np.zeros_like(pred)
+    gt_labels[:,-1]=1
+    factor = 25/16
+    for idx in range(len(segments)):
+        id_s = int(segments[idx][0]*factor)
+        id_e = int(segments[idx][1]*factor)
+        class_idx = utils.str2ind(labels[idx],classlist)
+        gt_labels[id_s:id_e,class_idx]=1
+        gt_labels[id_s:id_e, -1] = 0
+    return(gt_labels)
+
 
 def getActLoc(vid_preds, frm_preds, vid_lens, act_thresh_cas, annotation_path, args):
-    gtsegments = np.load(annotation_path + '/segments.npy')
-    gtlabels = np.load(annotation_path + '/labels.npy')
-    videoname = np.load(annotation_path + '/videoname.npy')
+    gtsegments = np.load(annotation_path + '/segments.npy',allow_pickle=True)
+    gtlabels = np.load(annotation_path + '/labels.npy',allow_pickle=True)
+    videoname = np.load(annotation_path + '/videoname.npy',allow_pickle=True)
     videoname = np.array([v.decode('utf-8') for v in videoname])
-    subset = np.load(annotation_path + '/subset.npy')
+    subset = np.load(annotation_path + '/subset.npy',allow_pickle=True)
     subset = np.array([s.decode('utf-8') for s in subset])
-    classlist = np.load(annotation_path + '/classlist.npy')
+    classlist = np.load(annotation_path + '/classlist.npy',allow_pickle=True)
+    classlist_ori = classlist
     classlist = np.array([c.decode('utf-8') for c in classlist])
     ambilist = annotation_path + '/Ambiguous_test.txt'
     if os.path.isfile(ambilist):
@@ -49,10 +63,15 @@ def getActLoc(vid_preds, frm_preds, vid_lens, act_thresh_cas, annotation_path, a
     # Keep only the test subset annotations
     gts, gtl, vn, vp, fp, vl = [], [], [], [], [], []
     for i, s in enumerate(subset):
+        #zhoujq check train set map
         if subset[i] == 'test':
             gts.append(gtsegments[i])
             gtl.append(gtlabels[i])
             vn.append(videoname[i])
+        # if subset[i] == 'validation':
+        #     gts.append(gtsegments[i])
+        #     gtl.append(gtlabels[i])
+        #     vn.append(videoname[i])
 
     gtsegments = gts
     gtlabels = gtl
@@ -66,7 +85,14 @@ def getActLoc(vid_preds, frm_preds, vid_lens, act_thresh_cas, annotation_path, a
             vn.append(videoname[i])
             vp.append(vid_preds[i])
             fp.append(frm_preds[i])
+
+            # prediction_gt = compute_gt_list(gtsegments[i],gtlabels[i],classlist_ori,frm_preds[i])
+            # fp.append(prediction_gt)
+
             vl.append(vid_lens[i])
+            # zhoujq compute the theoritical maximun map
+
+
     gtlabels = gtl
     videoname = vn
 
@@ -80,6 +106,8 @@ def getActLoc(vid_preds, frm_preds, vid_lens, act_thresh_cas, annotation_path, a
 
     dataset_segment_predict = []
     class_threshold = args.class_threshold
+
+
     for c in templabelidx:
         c_temp = []
         # Get list of all predictions for class c
@@ -168,13 +196,13 @@ def NonMaximumSuppression(segs, overlapThresh):
 
 
 def getLocMAP(seg_preds, th, annotation_path, args):
-    gtsegments = np.load(annotation_path + '/segments.npy')
-    gtlabels = np.load(annotation_path + '/labels.npy')
-    videoname = np.load(annotation_path + '/videoname.npy')
+    gtsegments = np.load(annotation_path + '/segments.npy',allow_pickle=True)
+    gtlabels = np.load(annotation_path + '/labels.npy',allow_pickle=True)
+    videoname = np.load(annotation_path + '/videoname.npy',allow_pickle=True)
     videoname = np.array([v.decode('utf-8') for v in videoname])
-    subset = np.load(annotation_path + '/subset.npy')
+    subset = np.load(annotation_path + '/subset.npy',allow_pickle=True)
     subset = np.array([s.decode('utf-8') for s in subset])
-    classlist = np.load(annotation_path + '/classlist.npy')
+    classlist = np.load(annotation_path + '/classlist.npy',allow_pickle=True)
     classlist = np.array([c.decode('utf-8') for c in classlist])
     if args.feature_type == 'UNT': 
         factor = 10.0 / 4.0
@@ -184,10 +212,15 @@ def getLocMAP(seg_preds, th, annotation_path, args):
     # Keep only the test subset annotations
     gts, gtl, vn = [], [], []
     for i, s in enumerate(subset):
+        # zhoujq check train set map
         if subset[i] == 'test':
             gts.append(gtsegments[i])
             gtl.append(gtlabels[i])
             vn.append(videoname[i])
+        # if subset[i] == 'validation':
+        #     gts.append(gtsegments[i])
+        #     gtl.append(gtlabels[i])
+        #     vn.append(videoname[i])
 
     gtsegments = gts
     gtlabels = gtl
@@ -293,6 +326,9 @@ def getDetectionMAP(vid_preds, frm_preds, vid_lens, annotation_path, args):
     dmap_list = []
     seg = getActLoc(vid_preds, frm_preds, vid_lens,
                     np.arange(args.start_threshold, args.end_threshold, args.threshold_interval), annotation_path, args)
+
+    # seg = getActLoc_upperbd(vid_preds, frm_preds, vid_lens,
+    #                 np.arange(args.start_threshold, args.end_threshold, args.threshold_interval), annotation_path, args)
     for iou in iou_list:
         print('Testing for IoU %f' % iou)
         dmap_list.append(getLocMAP(seg, iou, annotation_path, args))

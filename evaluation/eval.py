@@ -43,7 +43,7 @@ def ss_eval(epoch, dataloader, args, logger, model, device):
     frm_preds = []
     vid_lens = []
     labels = []
-
+    # model.eval()
     for num, sample in enumerate(dataloader):
         if (num + 1) % 100 == 0:
             print('Testing test data point %d of %d' % (num + 1, len(dataloader)))
@@ -57,7 +57,7 @@ def ss_eval(epoch, dataloader, args, logger, model, device):
         with torch.no_grad():
             o_out, m_out, _ = model(Variable(features))
             vid_pred = o_out[0] * 0.6 + m_out[0] * 0.4
-            frm_pred = F.softmax(o_out[3], -1) * 0.6 + F.softmax(m_out[3], -1) * 0.4
+            frm_pred = F.softmax(o_out[3], -1) *args.frm_coef + F.softmax(m_out[3], -1) * (1-args.frm_coef)
             vid_att = o_out[2]
 
             frm_pred = frm_pred * vid_att[..., None]
@@ -86,10 +86,13 @@ def ss_eval(epoch, dataloader, args, logger, model, device):
         sum = sum + item[1]
         count += 1
 
-    logger.log_value('Test Classification mAP', cmap, epoch)
+    # logger.log_value('Test Classification mAP', cmap, epoch)
+    logger.add_scalar('mAP', cmap, epoch)
     for item in list(zip(dmap, iou)):
-        logger.log_value('Test Detection1 mAP @ IoU = ' + str(item[1]), item[0], epoch)
+        # logger.log_value('Test Detection1 mAP @ IoU = ' + str(item[1]), item[0], epoch)
+        logger.add_scalar('mAP@' + str(item[1]), item[0], epoch)
 
     print('average map = %f' % (sum / count))
+    logger.add_scalar('mAP@0.1:0.7', (sum / count), epoch)
 
     utils.write_results_to_file(args, dmap, sum / count, cmap, epoch)

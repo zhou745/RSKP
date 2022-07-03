@@ -12,10 +12,10 @@ class VideoDataset(Dataset):
         self.path_to_features = args.dataset_root + '%s/%s-%s-JOINTFeatures.npy' % (
             args.dataset_name, args.dataset_name, args.feature_type)
         self.path_to_annotations = args.dataset_root + self.dataset_name + '/'
-        self.features = np.load(self.path_to_features, encoding='bytes')
-        self.labels = np.load(self.path_to_annotations + 'labels_all.npy')
-        self.classlist = np.load(self.path_to_annotations + 'classlist.npy')
-        self.subset = np.load(self.path_to_annotations + 'subset.npy')
+        self.features = np.load(self.path_to_features, encoding='bytes',allow_pickle=True)
+        self.labels = np.load(self.path_to_annotations + 'labels_all.npy',allow_pickle=True)
+        self.classlist = np.load(self.path_to_annotations + 'classlist.npy',allow_pickle=True)
+        self.subset = np.load(self.path_to_annotations + 'subset.npy',allow_pickle=True)
         self.trainidx = []
         self.testidx = []
         self.classwiseidx = []
@@ -55,6 +55,7 @@ class VideoDataset(Dataset):
             sample['idx'] = idx
             sample['data'] = feat
             sample['labels'] = labs
+            sample['vid_len'] = feat.shape[0]
         elif self.run_type == 'test':
             labs = self.labels_multihot[self.testidx[idx]]
             feat = self.features[self.testidx[idx]]

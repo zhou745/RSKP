@@ -10,8 +10,8 @@ from model.memory import Memory
 from model.main_branch import WSTAL, random_walk
 from model.losses import NormalizedCrossEntropy, AttLoss, CategoryCrossEntropy
 from utils.video_dataloader import VideoDataset
-from tensorboard_logger import Logger
-
+# from tensorboard_logger import Logger
+from torch.utils.tensorboard import SummaryWriter
 
 class Processor():
     def __init__(self, args):
@@ -19,7 +19,8 @@ class Processor():
         self.args = args
         # create logger
         log_dir = './logs/' + self.args.dataset_name + '/' + str(self.args.model_id)
-        self.logger = Logger(log_dir)
+        # self.logger = Logger(log_dir)
+        self.logger = SummaryWriter(log_dir)
         # device
         self.device = torch.device(
             'cuda:' + str(self.args.gpu_ids[0]) if torch.cuda.is_available() and len(self.args.gpu_ids) > 0 else 'cpu')
@@ -31,15 +32,16 @@ class Processor():
                 self.train_data_loader = torch.utils.data.DataLoader(self.train_dataset,
                                                                      batch_size=1,
                                                                      shuffle=True,
-                                                                     num_workers=2 * len(self.args.gpu_ids),
+                                                                     num_workers=0,
                                                                      drop_last=False)
                 self.train_data_loader_tmp = torch.utils.data.DataLoader(self.train_dataset, batch_size=1,
-                                                                         shuffle=False, drop_last=False)  
+                                                                         shuffle=False, drop_last=False,num_workers=0)
                 self.test_data_loader = torch.utils.data.DataLoader(VideoDataset(self.args, 'test'), batch_size=1,
-                                                                    shuffle=False, drop_last=False)
+                                                                    shuffle=False, drop_last=False,num_workers=0)
             elif self.args.run_type == 1:
+                #zhoujq
                 self.test_data_loader = torch.utils.data.DataLoader(VideoDataset(self.args, 'test'), batch_size=1,
-                                                                    shuffle=False, drop_last=False)
+                                                                    shuffle=False, drop_last=False,num_workers=0)
         else:
             raise ValueError('Do Not Exist This Dataset')
 
@@ -132,11 +134,24 @@ class Processor():
 
                 o_out, m_out, em_out = self.model(features)
 
-                vid_fore_loss = self.loss_nce(o_out[0], f_labels) + self.loss_nce(m_out[0], f_labels)
-                vid_back_loss = self.loss_nce(o_out[1], b_labels) + self.loss_nce(m_out[1], b_labels)
-                vid_att_loss = self.loss_att(o_out[2])
+                if self.args.use_foreloss==1:
+                    #zhoujq
+                    # f_labels_new = f_labels*2+b_labels
+                    f_labels_new = f_labels
+                    vid_fore_loss = self.loss_nce(o_out[0], f_labels_new) + self.loss_nce(m_out[0], f_labels_new)
+                else:
+                    vid_fore_loss = torch.tensor(0).to(self.device)
+                if self.args.use_backloss==1:
+                    vid_back_loss = self.loss_nce(o_out[1], b_labels) + self.loss_nce(m_out[1], b_labels)
+                else:
+                    vid_back_loss = torch.tensor(0).to(self.device)
 
-                if epoch > self.args.warmup_epoch:
+                if self.args.use_attloss == 1:
+                    vid_att_loss = self.loss_att(o_out[2])
+                else:
+                    vid_att_loss = torch.tensor(0).to(self.device)
+
+                if epoch > self.args.warmup_epoch and self.args.use_mem==1:
                     idxs = np.where(np_labels==1)[0].tolist()
                     cls_mu = self.memory._return_queue(idxs).detach()
                     reallocated_x = random_walk(em_out[0], cls_mu, self.args.w)
@@ -150,8 +165,8 @@ class Processor():
                 else:
                     vid_spl_loss = self.loss_spl(o_out[3], m_out[3])
 
-                total_loss = vid_fore_loss + vid_back_loss * self.args.lambda_b \
-                + vid_att_loss * self.args.lambda_a + vid_spl_loss * self.args.lambda_s
+                total_loss = vid_fore_loss*self.args.fore_loss_weight + vid_back_loss * self.args.lambda_b \
+                + vid_att_loss * self.args.lambda_a + vid_spl_loss * self.args.spl_loss_weight
 
                 loss_recorder['cls_fore'] += vid_fore_loss.item()
                 loss_recorder['cls_back'] += vid_back_loss.item()
@@ -199,7 +214,7 @@ class Processor():
         lr_list = []
         current_epoch = epoch + 1
         for i in range(0, len(self.args.changeLR_list) + 1):
-            lr_list.append(self.args.lr * (0.2 ** i))
+            lr_list.append(self.args.lr * ((self.args.lr_decay) ** i))
 
         lr_range = self.args.changeLR_list.copy()
         lr_range.insert(0, 0)

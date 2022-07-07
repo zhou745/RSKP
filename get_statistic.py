@@ -4,11 +4,13 @@ from utils.utils import str2ind
 import options
 from evaluation.detectionMAP import getDetectionMAP as dtmAP
 import copy
+import torch
+from model.main_branch import WSTAL
+import os
+import torch.nn.functional as F
 
 f_per_feature = 16.
 f_per_second = 25.
-
-
 
 def convert_labels(gtsegments,gtlabels,features,classlist,subset):
     action_list = []
@@ -130,8 +132,51 @@ def compute_feature(pred_class, pred_seg, vid_length, plabels,gtseg,gtlabel):
 
     return(pred_class_new,pred_seg_new)
 
+def compute_meanscore(score_matrix,s,e):
+    sub_matrix = score_matrix[s:e,s:e]
+    score = sub_matrix.mean().cpu().detach().numpy()
+    return(score)
 
+def match_label(v_seg, threashhold):
+    v_seg_ = torch.tensor(v_seg)
+    v_seg_ = F.softmax(v_seg_*10,dim=-1)
+    v_seg_norm = v_seg_/v_seg_.norm(dim=-1,keepdim=True)
+    score_matrix = v_seg_norm@v_seg_norm.T
+    num_frames = score_matrix.shape[0]
+    segment_act = []
+    act = 0  # start from empty act
+    start = 0
+    for idx in range(1,num_frames):
+        score = compute_meanscore(score_matrix,start,idx)
+        if score<threashhold[act]:
+            #only act is added
+            if act==1:
+                segment_act.append([start,idx])
+            act=1-act
+            start = idx
+    return(segment_act)
 
+def compute_pred(pred_class, pred_seg, vid_length, plabels,gtseg,gtlabel):
+    pred_class_new = np.copy(pred_class)
+    # precompute the action position list
+    pred_seg_new = np.zeros_like(pred_seg)
+    pred_seg_new[:, -1] = 1.
+
+    vid_len = vid_length
+
+    #compute the action point
+    for idj in range(len(plabels)):
+        s = plabels[idj][0]
+        e = plabels[idj][1]
+        s_t = s*f_per_feature/f_per_second
+        e_t = e*f_per_feature/f_per_second
+
+        #match the segment s,e
+        index_matched = match_closest([s,e],gtseg)
+        pred_seg_new[s:e,-1] = 0
+        class_idx = gtlabel[index_matched]
+        pred_seg_new[s:e, class_idx]=1.
+    return(pred_class_new,pred_seg_new)
 
 def main():
 
@@ -146,19 +191,70 @@ def main():
     gtlabels = np.load(root + '/labels.npy', allow_pickle=True)
 
     action_list, label_list,pred_seg,pred_class,vid_length,gtseg, gtlabel = convert_labels(gtsegments,gtlabels,features,classlist,subset)
+    #get the select list of features
+    select_list = []
+    for idx in range(features.shape[0]):
+        if subset[idx]==b'test':
+            select_list.append(1)
+        else:
+            select_list.append(0)
+    select = np.array(select_list,dtype=np.bool)
 
+    val_features_ori = features[select]
+    #load pretrained model
+    device = "cuda"
+    model = WSTAL(args).to(device)
+    if True:
+        model_dir = './ckpt/' + args.dataset_name + '/' + str(args.model_id) + '/' + str(
+            args.load_epoch) + '.pkl'
+        if os.path.isfile(model_dir):
+            model.load_state_dict(torch.load(model_dir))
+        else:
+            raise ValueError('Do Not Exist This Pretrained File')
+    model.eval()
+    #compute new features
+    val_features = []
+    val_class = []
+    for idx  in tqdm(range(val_features_ori.shape[0])):
+        val_features_cuda = torch.from_numpy(val_features_ori[idx]).float().to(device).unsqueeze(0)
+        cls_atts = []
+        with torch.no_grad():
+            o_out, m_out, _ = model(val_features_cuda)
+            vid_pred = o_out[0] * 0.75 + m_out[0] * 0.25
+            # frm_pred = F.softmax(torch.sign(o_out[3])*torch.abs(o_out[3])**0.995, -1) * args.frm_coef + F.softmax(m_out[3], -1) * (1 - args.frm_coef)
+            frm_pred = F.softmax(torch.sign(o_out[3]) * torch.abs(o_out[3]), -1) * args.frm_coef + F.softmax(
+                m_out[3], -1) * (1 - args.frm_coef)
+            vid_att = o_out[2]
+
+            frm_pred = frm_pred * vid_att[..., None]
+            vid_pred = np.squeeze(vid_pred.cpu().data.numpy(), axis=0)
+            frm_pred = np.squeeze(frm_pred.cpu().data.numpy(), axis=0)
+            val_features.append(frm_pred**0.988)
+            val_class.append(vid_pred)
+    val_features = np.array(val_features)
+    val_class = np.array(val_class)
     #get some statistics
-    frm_mean,frm_std, num_mean, num_std, num_list = compute_frm_mean_std(action_list)
+    # frm_mean,frm_std, num_mean, num_std, num_list = compute_frm_mean_std(action_list)
     #now we hand craft features
-    anchor_num = 10
-    anchor_length = 0.02
+    anchor_num = 20
+    anchor_length = 0.01
 
-    anchors = generate_anchor(anchor_num,type = "uniform")
-    plabels = genrate_psuedo_label(anchors,anchor_length)
-    pred_class_new,pred_seg_new = compute_feature(pred_class, pred_seg, vid_length, plabels,gtseg,gtlabel)
+    #compute the similarity matrix
+    threashold = [0.8,0.8]
+    pred_class_new = []
+    pred_seg_new = []
+    for idx in tqdm(range(val_features_ori.shape[0])):
+        seg_act = match_label(val_features[idx], threashold)
+        pred_class_tmp, pred_seg_tmp = compute_pred(pred_class[idx], pred_seg[idx],vid_length[idx],seg_act,gtseg[idx],gtlabel[idx])
+        pred_class_new.append(pred_class_tmp)
+        pred_seg_new.append(pred_seg_tmp)
+    # anchors = generate_anchor(anchor_num,type = "uniform")
+    # plabels = genrate_psuedo_label(anchors,anchor_length)
+    # pred_class_new,pred_seg_new = compute_feature(pred_class, pred_seg, vid_length, plabels,gtseg,gtlabel)
     #test the current prediction for psuedo label
     # dmap, iou = dtmAP(pred_class, pred_seg, vid_length, root, args)
-    dmap, iou = dtmAP(pred_class_new, pred_seg_new, vid_length, root, args)
+    # dmap, iou = dtmAP(pred_class_new, pred_seg_new, vid_length, root, args)
+    dmap, iou = dtmAP(val_class,val_features, vid_length, root, args)
 
     sum = 0
     count = 0

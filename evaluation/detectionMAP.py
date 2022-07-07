@@ -127,8 +127,8 @@ def getActLoc(vid_preds, frm_preds, vid_lens, act_thresh_cas, annotation_path, a
                     len_proposal = e[j] - s[j]
                     if len_proposal >= 2:
                         inner_score = np.mean(vid_cas[s[j]:e[j] + 1])
-                        outer_s = max(0, int(s[j]- 0.25 * len_proposal))
-                        outer_e = min(int(vid_cas.shape[0]-1), int(e[j] + 0.25 * len_proposal + 1))
+                        outer_s = max(0, int(s[j]- 0.0785 * (len_proposal**0.9)))
+                        outer_e = min(int(vid_cas.shape[0]-1), int(e[j] + 0.0785 * (len_proposal**0.9) + 1))
                         outer_temp_list = list(range(outer_s, int(s[j]))) + list(range(int(e[j] + 1), outer_e))
                         if len(outer_temp_list) == 0:
                             outer_score = 0
@@ -136,8 +136,9 @@ def getActLoc(vid_preds, frm_preds, vid_lens, act_thresh_cas, annotation_path, a
                             outer_score = np.mean(vid_cas[outer_temp_list])
                         c_score = inner_score - outer_score
                         vid_cls_proposal.append([i, s[j], e[j] + 1, c_score])
-            pick_idx = NonMaximumSuppression(np.array(vid_cls_proposal), 0.5)
+            pick_idx, refined_seg = NonMaximumSuppression(np.array(vid_cls_proposal), 0.25, vl[i][0])
             nms_vid_cls_proposal = [vid_cls_proposal[k] for k in pick_idx]
+            # nms_vid_cls_proposal = refined_seg
             c_temp += nms_vid_cls_proposal
         if len(c_temp) > 0:
             c_temp = np.array(c_temp)
@@ -149,10 +150,10 @@ def getActLoc(vid_preds, frm_preds, vid_lens, act_thresh_cas, annotation_path, a
     return dataset_segment_predict
 
 
-def NonMaximumSuppression(segs, overlapThresh):
+def NonMaximumSuppression(segs, overlapThresh,lenth):
     # if there are no boxes, return an empty list
     if len(segs) == 0:
-        return []
+        return [],[]
     # if the bounding boxes integers, convert them to floats --
     # this is important since we'll be doing a bunch of divisions
     if segs.dtype.kind == "i":
@@ -160,7 +161,7 @@ def NonMaximumSuppression(segs, overlapThresh):
 
     # initialize the list of picked indexes
     pick = []
-
+    refined_seg = []
     # grab the coordinates of the segments
     s = segs[:, 1]
     e = segs[:, 2]
@@ -172,11 +173,28 @@ def NonMaximumSuppression(segs, overlapThresh):
 
     # keep looping while some indexes still remain in the indexes
     # list
+    #reject predict that is covered by too many predictions
+    current_occupation = np.array([0 for idx in range(lenth)],dtype=float)
+    num_prediction = len(segs)
     while len(idxs) > 0:
         # grab the last index in the indexes list and add the
         # index value to the list of picked indexes
         last = len(idxs) - 1
         i = idxs[last]
+        #compute seg occupations
+        seg_occupation = np.array([0 for idx in range(lenth)],dtype=float)
+        seg_occupation[int(s[i].item()):int(e[i].item())+1] = 1.
+
+        seg_length = seg_occupation.sum()
+        seg_used = (current_occupation*seg_occupation).sum()
+
+        ration = seg_used/seg_length
+        # if ration>num_prediction/3:
+        #     idxs = np.delete(idxs,0)
+        #     continue
+
+
+
         pick.append(i)
 
         # find the largest coordinates for the start of
@@ -189,10 +207,28 @@ def NonMaximumSuppression(segs, overlapThresh):
         l = np.maximum(0, mine - maxs + 1)
         # compute the ratio of overlap
         overlap = l / area[idxs[:last]]
-
+        #compute all the position that is possibly occupied
+        s_all = 0.
+        e_all = 0.
+        score_all = 0.
+        weight_all = 0.
+        a = 7
+        for idj in np.concatenate(([last], np.where(overlap > overlapThresh)[0])):
+            # current_occupation[int(s[idj].item()):int(e[idj].item()) + 1] += 1.
+            id_seg = idxs[idj]
+            s_all += s[id_seg]*(np.sign(scores[id_seg])*np.abs(scores[id_seg])**a)
+            e_all += e[id_seg]*(np.sign(scores[id_seg])*np.abs(scores[id_seg])**a)
+            score_all += scores[id_seg]*(np.sign(scores[id_seg])*np.abs(scores[id_seg])**a)
+            weight_all += (np.sign(scores[id_seg])*np.abs(scores[id_seg])**a)
+        s_all = s_all/weight_all
+        e_all = e_all/weight_all
+        score_all = score_all/weight_all
+        refined_seg.append([segs[i][0], s_all,e_all, score_all])
         # delete segments beyond the threshold
         idxs = np.delete(idxs, np.concatenate(([last], np.where(overlap > overlapThresh)[0])))
-    return pick
+
+
+    return (pick,refined_seg)
 
 
 def getLocMAP(seg_preds, th, annotation_path, args):
@@ -275,6 +311,7 @@ def getLocMAP(seg_preds, th, annotation_path, args):
                             best_j = j
             if matched:
                 del segment_gt[best_j]
+                # pass
             tp.append(float(matched))
             fp.append(1. - float(matched))
         tp_c = np.cumsum(tp)

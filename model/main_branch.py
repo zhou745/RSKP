@@ -19,37 +19,37 @@ def calculate_l1_norm(f):
     f = f / (f_norm + 1e-9)
     return f
 
-# def random_walk(x, y, w):
-#     x_norm = calculate_l1_norm(x)
-#     y_norm = calculate_l1_norm(y)
-#     eye_x = torch.eye(x.size(1)).float().to(x.device)
-#
-#     latent_z = F.softmax(torch.einsum('nkd,ntd->nkt', [y_norm, x_norm]) * 5.0, 1)
-#     norm_latent_z = latent_z / (latent_z.sum(dim=-1, keepdim=True) + 1e-9)
-#     affinity_mat = torch.einsum('nkt,nkd->ntd', [latent_z, norm_latent_z])
-#     # mat_inv_x = torch.linalg.solve(eye_x, eye_x - (w ** 2) * affinity_mat)
-#     mat_inv_x = torch.inverse(eye_x - (w ** 2) * affinity_mat)
-#     y2x_sum_x = w * torch.einsum('nkt,nkd->ntd', [latent_z, y]) + x
-#     refined_x = (1 - w) * torch.einsum('ntk,nkd->ntd', [mat_inv_x, y2x_sum_x])
-#
-#     return refined_x
-
 def random_walk(x, y, w):
     x_norm = calculate_l1_norm(x)
     y_norm = calculate_l1_norm(y)
     eye_x = torch.eye(x.size(1)).float().to(x.device)
-    latent_z = torch.einsum('nkd,ntd->nkt', [y_norm, x_norm])
-    latent_z = (latent_z-latent_z.mean(dim=1,keepdim=True))/(latent_z.std(dim=1,keepdim=True)+1e-3)
-    latent_z = F.softmax(latent_z * 5.0, 1)
-    refined_x = torch.einsum('nkt,nkd->ntd', [latent_z, y_norm])
-    # norm_latent_z = latent_z / (latent_z.sum(dim=-1, keepdim=True) + 1e-9)
-    # affinity_mat = torch.einsum('nkt,nkd->ntd', [latent_z, norm_latent_z])
-    # # mat_inv_x = torch.linalg.solve(eye_x, eye_x - (w ** 2) * affinity_mat)
-    # mat_inv_x = torch.inverse(eye_x - (w ** 2) * affinity_mat)
-    # y2x_sum_x = w * torch.einsum('nkt,nkd->ntd', [latent_z, y]) + x
-    # refined_x = (1 - w) * torch.einsum('ntk,nkd->ntd', [mat_inv_x, y2x_sum_x])
+
+    latent_z = F.softmax(torch.einsum('nkd,ntd->nkt', [y_norm, x_norm]) * 5.0, 1)
+    norm_latent_z = latent_z / (latent_z.sum(dim=-1, keepdim=True) + 1e-9)
+    affinity_mat = torch.einsum('nkt,nkd->ntd', [latent_z, norm_latent_z])
+    # mat_inv_x = torch.linalg.solve(eye_x, eye_x - (w ** 2) * affinity_mat)
+    mat_inv_x = torch.inverse(eye_x - (w ** 2) * affinity_mat)
+    y2x_sum_x = w * torch.einsum('nkt,nkd->ntd', [latent_z, y]) + x
+    refined_x = (1 - w) * torch.einsum('ntk,nkd->ntd', [mat_inv_x, y2x_sum_x])
 
     return refined_x
+
+# def random_walk(x, y, w):
+#     x_norm = calculate_l1_norm(x)
+#     y_norm = calculate_l1_norm(y)
+#     eye_x = torch.eye(x.size(1)).float().to(x.device)
+#     latent_z = torch.einsum('nkd,ntd->nkt', [y_norm, x_norm])
+#     latent_z = (latent_z-latent_z.mean(dim=1,keepdim=True))/(latent_z.std(dim=1,keepdim=True)+1e-3)
+#     latent_z = F.softmax(latent_z * 5.0, 1)
+#     refined_x = torch.einsum('nkt,nkd->ntd', [latent_z, y_norm])
+#     # norm_latent_z = latent_z / (latent_z.sum(dim=-1, keepdim=True) + 1e-9)
+#     # affinity_mat = torch.einsum('nkt,nkd->ntd', [latent_z, norm_latent_z])
+#     # # mat_inv_x = torch.linalg.solve(eye_x, eye_x - (w ** 2) * affinity_mat)
+#     # mat_inv_x = torch.inverse(eye_x - (w ** 2) * affinity_mat)
+#     # y2x_sum_x = w * torch.einsum('nkt,nkd->ntd', [latent_z, y]) + x
+#     # refined_x = (1 - w) * torch.einsum('ntk,nkd->ntd', [mat_inv_x, y2x_sum_x])
+#
+#     return refined_x
 
 class WSTAL(nn.Module):
     def __init__(self, args):
@@ -81,25 +81,25 @@ class WSTAL(nn.Module):
         self.sigmoid = nn.Sigmoid()
         self.apply(weights_init_random)
 
-    # def EM(self, mu, x):
-    #     # propagation -> make mu as video-specific mu
-    #     norm_x = calculate_l1_norm(x)
-    #     for _ in range(self.em_iter):
-    #         norm_mu = calculate_l1_norm(mu)
-    #         latent_z = F.softmax(torch.einsum('nkd,ntd->nkt', [norm_mu, norm_x]) * 5.0, 1)
-    #         norm_latent_z = latent_z / (latent_z.sum(dim=-1, keepdim=True)+1e-9)
-    #         mu = torch.einsum('nkt,ntd->nkd', [norm_latent_z, x])
-    #     return mu
     def EM(self, mu, x):
         # propagation -> make mu as video-specific mu
         norm_x = calculate_l1_norm(x)
         for _ in range(self.em_iter):
             norm_mu = calculate_l1_norm(mu)
-            #compute the probabilty distribution
             latent_z = F.softmax(torch.einsum('nkd,ntd->nkt', [norm_mu, norm_x]) * 5.0, 1)
             norm_latent_z = latent_z / (latent_z.sum(dim=-1, keepdim=True)+1e-9)
             mu = torch.einsum('nkt,ntd->nkd', [norm_latent_z, x])
         return mu
+    # def EM(self, mu, x):
+    #     # propagation -> make mu as video-specific mu
+    #     norm_x = calculate_l1_norm(x)
+    #     for _ in range(self.em_iter):
+    #         norm_mu = calculate_l1_norm(mu)
+    #         #compute the probabilty distribution
+    #         latent_z = F.softmax(torch.einsum('nkd,ntd->nkt', [norm_mu, norm_x]) * 5.0, 1)
+    #         norm_latent_z = latent_z / (latent_z.sum(dim=-1, keepdim=True)+1e-9)
+    #         mu = torch.einsum('nkt,ntd->nkd', [norm_latent_z, x])
+    #     return mu
 
     # def PredictionModule(self, x):
     #     # normalization

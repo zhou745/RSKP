@@ -2,3 +2,5 @@
 ckpt/
 logs/
 data/
+__pycache__/
+

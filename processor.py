@@ -5,6 +5,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Variable
 import numpy as np
+
+import utils.utils
 from evaluation.eval import ft_eval, ss_eval
 from model.memory import Memory
 from model.main_branch import WSTAL, random_walk
@@ -24,6 +26,8 @@ class Processor():
         # device
         self.device = torch.device(
             'cuda:' + str(self.args.gpu_ids[0]) if torch.cuda.is_available() and len(self.args.gpu_ids) > 0 else 'cpu')
+
+        #
 
         # dataloader
         if self.args.dataset_name in ['Thumos14', 'Thumos14reduced']:
@@ -53,13 +57,20 @@ class Processor():
         # Model Setting
         self.model = WSTAL(self.args).to(self.device)
         self.memory = Memory(self.args).to(self.device)
+        #distilation model setting by zhoujq
+        self.dist_model = WSTAL(self.args).to(self.device)
 
         # Model Parallel Setting
         if len(self.args.gpu_ids) > 1:
             self.model = nn.DataParallel(self.model, device_ids=self.args.gpu_ids)
             self.model_module = self.model.module
+
+            # by zhoujq
+            self.dist_model =  nn.DataParallel(self.dist_model, device_ids=self.args.gpu_ids)
+            self.dist_model_module = self.dist_model.module
         else:
             self.model_module = self.model
+            self.dist_model_module = self.dist_model
 
         # Loading Pretrained Model
         if self.args.pretrained:
@@ -69,6 +80,10 @@ class Processor():
                 self.model_module.load_state_dict(torch.load(model_dir))
             else:
                 raise ValueError('Do Not Exist This Pretrained File')
+
+
+        #ensure weights are the same in the beginning by zhoujq
+        self.update_model(polyak_factor=1.0)
 
         # Optimizer Setting
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.args.lr, betas=[0.9, 0.99],
@@ -89,6 +104,10 @@ class Processor():
         else:
             raise ValueError('Do not Exist This Processing')
 
+    def update_model(self, polyak_factor=1.0):
+        for target_param, param in zip(self.dist_model.parameters(),self.model.parameters()):
+            target_param.data.copy_(polyak_factor * param.data + target_param.data * (1.0 - polyak_factor))
+
     def train(self):
         print('Start training!')
         self.model_module.train(mode=True)
@@ -101,11 +120,15 @@ class Processor():
         iter = 0
         step = 0
         current_lr = self.args.lr
+
+        #by zhoujq
         loss_recorder = {
             'cls_fore': 0,
             'cls_back': 0,
             'att': 0,
             'spl': 0,
+            'match': 0,
+            'KD': 0,
         }
         for epoch in epoch_range:
             for num, sample in enumerate(self.train_data_loader):
@@ -133,6 +156,15 @@ class Processor():
                 b_labels = torch.cat([labels, torch.ones(labels.size(0), 1).to(self.device)], -1)
 
                 o_out, m_out, em_out = self.model(features)
+
+                #compute the prediction of the distilation model by zhoujq
+                with torch.no_grad():
+                    d_o_out, d_m_out, d_em_out = self.dist_model(features)
+                #compute the self distlation psuedo label
+                pred_label = utils.utils.fuse_current_pred(d_o_out, d_m_out, d_em_out, f_labels, self.args)
+
+                #compute the distilation loss by zhoujq
+                loss_dist = utils.utils.compute_distloss(o_out, m_out, em_out, pred_label)
 
                 if self.args.use_foreloss==1:
                     #zhoujq
@@ -165,13 +197,23 @@ class Processor():
                 else:
                     vid_spl_loss = self.loss_spl(o_out[3], m_out[3])
 
-                total_loss = vid_fore_loss*self.args.fore_loss_weight + vid_back_loss * self.args.lambda_b \
-                + vid_att_loss * self.args.lambda_a + vid_spl_loss * self.args.spl_loss_weight
+                #compute the constrained cluster loss
+                scores = utils.utils.compute_score_matrix(features)
+                threshhold = [float(it) for it in self.args.threshhold]
+                pred_score = utils.utils.compute_action_labels(scores,labels,threshhold)
+                pred_model = torch.log_softmax(o_out[3] / self.args.T, -1)
+                loss_matching = (-pred_model*pred_score).sum(dim=-1).mean()
+
+                total_loss = vid_fore_loss*self.args.fore_loss_weight + vid_back_loss * self.args.back_loss_weight \
+                + vid_att_loss * self.args.att_loss_weight + vid_spl_loss * self.args.spl_loss_weight \
+                + self.args.match_loss*loss_matching + self.args.dist_loss*loss_dist
 
                 loss_recorder['cls_fore'] += vid_fore_loss.item()
                 loss_recorder['cls_back'] += vid_back_loss.item()
                 loss_recorder['att'] += vid_att_loss.item()
                 loss_recorder['spl'] += vid_spl_loss.item()
+                loss_recorder['match'] += loss_matching.item()
+                loss_recorder['KD'] += loss_dist.item()
                 total_loss.backward()
 
                 if iter % self.args.batch_size == 0:

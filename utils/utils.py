@@ -262,7 +262,8 @@ def fuse_current_pred(d_o_out, d_m_out, d_em_out,gtlabels, args, approach="naive
     fram_pred_cuda = torch.tensor(fram_pred).to(d_o_out[0].device)
     return(fram_pred_cuda)
 
-def compute_distloss(o_out, m_out, em_out, pred_label):
-    loss_o = -(F.log_softmax(o_out[3], -1)*pred_label).sum(dim=-1).mean()
-
+def compute_distloss(o_out, m_out, em_out, pred_label,args):
+    # loss_o = -(F.log_softmax(o_out[3], -1)*pred_label).sum(dim=-1).mean()
+    loss_o = -(F.log_softmax(o_out[3], -1)*pred_label).sum(dim=-1).mean()*args.frm_coef + \
+             -(F.log_softmax(m_out[3], -1) * pred_label).sum(dim=-1).mean()*(1-args.frm_coef)
     return(loss_o)

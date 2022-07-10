@@ -164,7 +164,7 @@ class Processor():
                 pred_label = utils.utils.fuse_current_pred(d_o_out, d_m_out, d_em_out, f_labels, self.args)
 
                 #compute the distilation loss by zhoujq
-                loss_dist = utils.utils.compute_distloss(o_out, m_out, em_out, pred_label)
+                loss_dist = utils.utils.compute_distloss(o_out, m_out, em_out, pred_label,self.args)
 
                 if self.args.use_foreloss==1:
                     #zhoujq
@@ -245,6 +245,9 @@ class Processor():
                 self.model_module.eval()
                 ss_eval(epoch + 1, self.test_data_loader, self.args, self.logger, self.model_module, self.device)
                 self.model_module.train()
+            if (epoch + 1) % 10 == 0:
+                #update the current dist model every 10 epoch
+                self.update_model(polyak_factor=0.01)
 
     def val(self, epoch):
         print('Start testing!')

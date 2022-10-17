@@ -129,16 +129,20 @@ def getActLoc(vid_preds, frm_preds, vid_lens, act_thresh_cas, annotation_path, a
                         inner_score = np.mean(vid_cas[s[j]:e[j] + 1])
                         outer_s = max(0, int(s[j]- 0.0785 * (len_proposal**0.9)))
                         outer_e = min(int(vid_cas.shape[0]-1), int(e[j] + 0.0785 * (len_proposal**0.9) + 1))
+                        # outer_s = max(0, int(s[j]- 0.0785 * (len_proposal)))
+                        # outer_e = min(int(vid_cas.shape[0]-1), int(e[j] + 0.0785 * (len_proposal) + 1))
                         outer_temp_list = list(range(outer_s, int(s[j]))) + list(range(int(e[j] + 1), outer_e))
                         if len(outer_temp_list) == 0:
                             outer_score = 0
                         else:
                             outer_score = np.mean(vid_cas[outer_temp_list])
                         c_score = inner_score - outer_score
-                        vid_cls_proposal.append([i, s[j], e[j] + 1, c_score])
-            pick_idx, refined_seg = NonMaximumSuppression(np.array(vid_cls_proposal), 0.25, vl[i][0])
-            nms_vid_cls_proposal = [vid_cls_proposal[k] for k in pick_idx]
-            # nms_vid_cls_proposal = refined_seg
+                        vid_cls_proposal.append([i, s[j], e[j] + 1, c_score, inner_score])
+            pick_idx, refined_seg = NonMaximumSuppression(np.array(vid_cls_proposal), 0.25, vl[i][0],T=0.02)
+            if args.use_new_predictor == False:
+                nms_vid_cls_proposal = [vid_cls_proposal[k][:-1] for k in pick_idx]
+            else:
+                nms_vid_cls_proposal = refined_seg
             c_temp += nms_vid_cls_proposal
         if len(c_temp) > 0:
             c_temp = np.array(c_temp)
@@ -150,7 +154,7 @@ def getActLoc(vid_preds, frm_preds, vid_lens, act_thresh_cas, annotation_path, a
     return dataset_segment_predict
 
 
-def NonMaximumSuppression(segs, overlapThresh,lenth):
+def NonMaximumSuppression(segs, overlapThresh,lenth,T=0.01):
     # if there are no boxes, return an empty list
     if len(segs) == 0:
         return [],[]
@@ -212,14 +216,24 @@ def NonMaximumSuppression(segs, overlapThresh,lenth):
         e_all = 0.
         score_all = 0.
         weight_all = 0.
-        a = 7
+
+        weights = segs[:, 4]
         for idj in np.concatenate(([last], np.where(overlap > overlapThresh)[0])):
             # current_occupation[int(s[idj].item()):int(e[idj].item()) + 1] += 1.
             id_seg = idxs[idj]
-            s_all += s[id_seg]*(np.sign(scores[id_seg])*np.abs(scores[id_seg])**a)
-            e_all += e[id_seg]*(np.sign(scores[id_seg])*np.abs(scores[id_seg])**a)
-            score_all += scores[id_seg]*(np.sign(scores[id_seg])*np.abs(scores[id_seg])**a)
-            weight_all += (np.sign(scores[id_seg])*np.abs(scores[id_seg])**a)
+            # s_all += s[id_seg]*(np.sign(scores[id_seg])*np.abs(scores[id_seg])**a)
+            # e_all += e[id_seg]*(np.sign(scores[id_seg])*np.abs(scores[id_seg])**a)
+            # score_all += scores[id_seg]*(np.sign(scores[id_seg])*np.abs(scores[id_seg])**a)
+            # weight_all += (np.sign(scores[id_seg])*np.abs(scores[id_seg])**a)
+            # s_all += s[id_seg]*(np.sign(weights[id_seg])*np.abs(weights[id_seg])**a)
+            # e_all += e[id_seg]*(np.sign(weights[id_seg])*np.abs(weights[id_seg])**a)
+            # score_all += scores[id_seg]*(np.sign(weights[id_seg])*np.abs(weights[id_seg])**a)
+            # weight_all += (np.sign(weights[id_seg])*np.abs(weights[id_seg])**a)
+            s_all += s[id_seg]*np.exp(weights[id_seg]/T)
+            e_all += e[id_seg]*np.exp(weights[id_seg]/T)
+            score_all += scores[id_seg]*np.exp(weights[id_seg]/T)
+            weight_all += np.sign(weights[id_seg])*np.exp(weights[id_seg]/T)
+
         s_all = s_all/weight_all
         e_all = e_all/weight_all
         score_all = score_all/weight_all

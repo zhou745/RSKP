@@ -6,8 +6,8 @@ from utils.utils import write_settings_to_file
 
 def main(training_type = 0):
     if training_type==0:
-        import options_baseline as options
-        from baseline import Processor
+        import options_baseline_anet as options
+        from baseline_anet import Processor
     elif training_type==1:
         import options_pretrain as options
         from pretraining import Processor

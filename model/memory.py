@@ -42,3 +42,8 @@ class Memory(nn.Module):
             mus.append(self.cls_mu_queue[idx][None, ...])
         mus = torch.cat(mus, 1)
         return mus
+
+    @torch.no_grad()
+    def _emprty_queue(self,):
+        self.cls_mu_queue = self.cls_mu_queue*0.
+        self.cls_sc_queue = self.cls_sc_queue*0.

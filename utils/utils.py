@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from scipy.interpolate import interp1d
+from scipy.optimize import linprog
 
 
 def str2ind(categoryname, classlist):
@@ -117,7 +118,7 @@ def compute_action_labels(scores,labels, threashhold,num_class = 20):
 
     return(segment_act)
 
-def prediction_fuse_module(segs, overlapThresh, fuse_power = 7):
+def prediction_fuse_module(segs, overlapThresh, fuse_power = 10.5,T=0.1):
     # if there are no boxes, return an empty list
     if len(segs) == 0:
         return [], []
@@ -137,7 +138,7 @@ def prediction_fuse_module(segs, overlapThresh, fuse_power = 7):
     # boxes by the score of the bounding box
     area = e - s + 1
     idxs = np.argsort(scores)
-
+    weights = segs[:, 3]
 
     while len(idxs) > 0:
         # grab the last index in the indexes list and add the
@@ -162,10 +163,19 @@ def prediction_fuse_module(segs, overlapThresh, fuse_power = 7):
         weight_all = 0.
         for idj in np.concatenate(([last], np.where(overlap > overlapThresh)[0])):
             id_seg = idxs[idj]
-            s_all += s[id_seg] * (np.sign(scores[id_seg]) * np.abs(scores[id_seg]) ** fuse_power)
-            e_all += e[id_seg] * (np.sign(scores[id_seg]) * np.abs(scores[id_seg]) ** fuse_power)
-            score_all += scores[id_seg] * (np.sign(scores[id_seg]) * np.abs(scores[id_seg]) ** fuse_power)
-            weight_all += (np.sign(scores[id_seg]) * np.abs(scores[id_seg]) ** fuse_power)
+            # s_all += s[id_seg] * (np.sign(scores[id_seg]) * np.abs(scores[id_seg]) ** fuse_power)
+            # e_all += e[id_seg] * (np.sign(scores[id_seg]) * np.abs(scores[id_seg]) ** fuse_power)
+            # score_all += scores[id_seg] * (np.sign(scores[id_seg]) * np.abs(scores[id_seg]) ** fuse_power)
+            # weight_all += (np.sign(scores[id_seg]) * np.abs(scores[id_seg]) ** fuse_power)
+            # s_all += s[id_seg]*(np.sign(weights[id_seg])*np.abs(weights[id_seg])**fuse_power)
+            # e_all += e[id_seg]*(np.sign(weights[id_seg])*np.abs(weights[id_seg])**fuse_power)
+            # score_all += scores[id_seg]*(np.sign(weights[id_seg])*np.abs(weights[id_seg])**fuse_power)
+            # weight_all += (np.sign(weights[id_seg])*np.abs(weights[id_seg])**fuse_power)
+            s_all += s[id_seg]*np.exp(weights[id_seg]/T)
+            e_all += e[id_seg]*np.exp(weights[id_seg]/T)
+            score_all += scores[id_seg]*np.exp(weights[id_seg]/T)
+            weight_all += np.sign(weights[id_seg])*np.exp(weights[id_seg]/T)
+
         s_all = s_all / weight_all
         e_all = e_all / weight_all
         score_all = score_all / weight_all
@@ -175,17 +185,121 @@ def prediction_fuse_module(segs, overlapThresh, fuse_power = 7):
 
     return (pick, refined_seg)
 
-def convert_segment_to_tensor(prediction_list, vid_lens, num_cls = 21):
+def compute_score_matrix(segment,vid_lens):
+    num_seg = segment.shape[0]
+    Matrix = np.zeros([num_seg,vid_lens],dtype=float)
+    Score = np.zeros([num_seg],dtype=float)
+
+    for seg_c_idx in range(segment.shape[0]):
+        s = int(segment[seg_c_idx,0])
+        e = int(segment[seg_c_idx,1])
+        len_proposal = e - s
+
+        outer_s = max(0, int(s - 0.0785 * (len_proposal ** 0.9)))
+        outer_e = min(int(vid_lens - 1), int(e + 0.0785 * (len_proposal ** 0.9) + 1))
+
+        Matrix[seg_c_idx,s:e] = 1.
+        Matrix[seg_c_idx, outer_s:s] = -1.
+        Matrix[seg_c_idx, e:outer_e] = -1.
+        Score[seg_c_idx] = segment[seg_c_idx,2]
+    return(Matrix,Score)
+
+
+def convert_segment_to_tensor(prediction_list, vid_lens, thresh_list = None, num_cls = 21):
     pred = np.zeros([vid_lens,num_cls],dtype=float)
+    count = np.zeros([vid_lens,num_cls],dtype=float)+1e-8
+    assert thresh_list is not None
+
     #parse the label cls by cls
     for c in range(num_cls):
         segments_c = prediction_list[c]
-        for seg_c in segments_c:
-            pred[int(seg_c[0]):int(seg_c[1]+1),c] += seg_c[2]
+        #sort the prediction list
+        if len(segments_c)>0:
+            num_seg = segments_c.shape[0]
+            step = (thresh_list[0]-thresh_list[-1])/num_seg
+            start = thresh_list[-1]
+            # for seg_c_idx in range(segments_c.shape[0]):
+            #     seg_c = segments_c[seg_c_idx]
+                # naive approach
+                # pred[int(seg_c[0]):int(seg_c[1]+1),c] += seg_c[2]   #later use hard label  set to 1
+                # pred[int(seg_c[0]):int(seg_c[1] + 1), c] += 1.
+                # pred[int(seg_c[0]):int(seg_c[1] + 1), c] += (start+seg_c_idx*step)*10
+                # count[int(seg_c[0]):int(seg_c[1] + 1), c] +=1
+                # #complex approach
+                # matrix_strenthen = compute_strenth_matrix(seg_c)
+                # matrix_weaken = compute_weaken_matrix(seg_c)
+            #compute the wighting matrix
+            weight_matrix_c,score_c = compute_score_matrix(segments_c,vid_lens)
+            # linprog_weight = np.concatenate([np.ones([vid_lens],dtype=float),np.ones([vid_lens],dtype=float)],axis=0)
+            # linprog_eq_A = np.concatenate([weight_matrix_c, -weight_matrix_c],axis=1)
+            # linprog_eq_b = score_c
+            linprog_weight = np.concatenate([np.ones([vid_lens],dtype=float)],axis=0)
+            linprog_eq_A = np.concatenate([weight_matrix_c],axis=1)
+            linprog_eq_b = score_c
+
+            # linprog_lb_A = np.eye(2*vid_lens,dtype=float)
+            # linprog_lb_b = np.zeros((2*vid_lens,),dtype=float)
+            pred_c_sci =linprog(linprog_weight,A_eq=linprog_eq_A,b_eq=linprog_eq_b,bounds=(0.,1.0))
+            pred_c = pred_c_sci.x
+            pred[:,c] = pred_c
+
+    #normalize the prediction
+    # pred_final = pred/count
+    pred_final = pred
 
 
-    return(pred)
+    return(pred_final)
 
+def generate_segs_eval(vid_preds, frm_preds, args, num_cls=21):
+
+
+    act_thresh_cas = np.arange(args.start_threshold, args.end_threshold, args.threshold_interval)
+
+    all_prediction_list = []
+    for c in range(num_cls):
+        c_temp = []
+
+        vid_cls_score = vid_preds[c]
+        #deter min by gt labels
+        if vid_cls_score < args.class_threshold:
+            all_prediction_list.append(c_temp)
+            continue
+
+        vid_cas = frm_preds[:, c]
+        vid_cls_proposal = []
+
+        for t in range(len(act_thresh_cas)):
+            thres = act_thresh_cas[t]
+            vid_pred = np.concatenate([np.zeros(1), (vid_cas > thres).astype('float32'), np.zeros(1)], axis=0)
+            vid_pred_diff = [vid_pred[idt] - vid_pred[idt - 1] for idt in range(1, len(vid_pred))]
+            s = [idk for idk, item in enumerate(vid_pred_diff) if item == 1]
+            e = [idk for idk, item in enumerate(vid_pred_diff) if item == -1]
+            for j in range(len(s)):
+                len_proposal = e[j] - s[j]
+                if len_proposal >= 2:
+                    inner_score = np.mean(vid_cas[s[j]:e[j] + 1])
+                    outer_s = max(0, int(s[j] - 0.0785 * (len_proposal ** 0.9)))
+                    outer_e = min(int(vid_cas.shape[0] - 1), int(e[j] + 0.0785 * (len_proposal ** 0.9) + 1))
+                    outer_temp_list = list(range(outer_s, int(s[j]))) + list(range(int(e[j] + 1), outer_e))
+                    if len(outer_temp_list) == 0:
+                        outer_score = 0
+                    else:
+                        outer_score = np.mean(vid_cas[outer_temp_list])
+                    c_score = inner_score - outer_score
+                    vid_cls_proposal.append([s[j], e[j] + 1, c_score,inner_score])
+        pick_idx, refined_seg = prediction_fuse_module(np.array(vid_cls_proposal), 0.25,fuse_power=args.dist_power,
+                                                                                        T = args.dist_temperature)
+
+        nms_vid_cls_proposal = refined_seg
+        c_temp += nms_vid_cls_proposal
+        if len(c_temp) > 0:
+            c_temp = np.array(c_temp)
+            c_temp = c_temp[np.argsort(-c_temp[:, 2])]
+
+        # import pdb; pdb.set_trace()
+        all_prediction_list.append(c_temp)
+    #convert segment prediction back to perfram labels
+    return all_prediction_list
 
 def generate_segs(vid_preds, frm_preds, vid_lens,gtlabels, args):
 
@@ -229,8 +343,9 @@ def generate_segs(vid_preds, frm_preds, vid_lens,gtlabels, args):
                     else:
                         outer_score = np.mean(vid_cas[outer_temp_list])
                     c_score = inner_score - outer_score
-                    vid_cls_proposal.append([s[j], e[j] + 1, c_score])
-        pick_idx, refined_seg = prediction_fuse_module(np.array(vid_cls_proposal), 0.25)
+                    vid_cls_proposal.append([s[j], e[j] + 1, c_score, inner_score])
+        pick_idx, refined_seg = prediction_fuse_module(np.array(vid_cls_proposal), 0.25,fuse_power=args.dist_power,
+                                                       T = args.dist_temperature)
 
         nms_vid_cls_proposal = refined_seg
         c_temp += nms_vid_cls_proposal
@@ -242,6 +357,17 @@ def generate_segs(vid_preds, frm_preds, vid_lens,gtlabels, args):
         all_prediction_list.append(c_temp)
     #convert segment prediction back to perfram labels
     return all_prediction_list
+
+# def compute_weighted_prediction(vid_pred, ori_frmpred, args,approach="naive"):
+#     vid_lens = ori_frmpred.shape[0]
+#     threshlist = np.arange(args.start_threshold, args.end_threshold, args.threshold_interval)
+#     prediction_list = generate_segs_eval(vid_pred, ori_frmpred, args)
+#     fram_pred = convert_segment_to_tensor(prediction_list, vid_lens,thresh_list=threshlist)
+#
+#     fram_pred_cuda = torch.tensor(fram_pred).unsqueeze(0)
+#     #normalize
+#     fram_pred_cuda = fram_pred_cuda/fram_pred_cuda.norm(dim=-1,keepdim=True)
+#     return(fram_pred_cuda)
 
 def fuse_current_pred(d_o_out, d_m_out, d_em_out,gtlabels, args, approach="naive"):
 
@@ -256,14 +382,38 @@ def fuse_current_pred(d_o_out, d_m_out, d_em_out,gtlabels, args, approach="naive
     vid_lens = frm_pred.shape[0]
 
     prediction_list = generate_segs(vid_pred, frm_pred, vid_lens,gtlabels, args)
-    fram_pred = convert_segment_to_tensor(prediction_list, vid_lens)
-
+    threshlist = np.arange(args.start_threshold, args.end_threshold, args.threshold_interval)
+    fram_pred = convert_segment_to_tensor(prediction_list, vid_lens,thresh_list=threshlist)
     #back to cuda
     fram_pred_cuda = torch.tensor(fram_pred).to(d_o_out[0].device)
+    #normalize to 1.
+
+
     return(fram_pred_cuda)
 
 def compute_distloss(o_out, m_out, em_out, pred_label,args):
     # loss_o = -(F.log_softmax(o_out[3], -1)*pred_label).sum(dim=-1).mean()
     loss_o = -(F.log_softmax(o_out[3], -1)*pred_label).sum(dim=-1).mean()*args.frm_coef + \
              -(F.log_softmax(m_out[3], -1) * pred_label).sum(dim=-1).mean()*(1-args.frm_coef)
+    # loss_o = -(F.log_softmax(o_out[3], -1)*pred_label).sum(dim=-1).mean()*1.0 + \
+    #          -(F.log_softmax(m_out[3], -1) * pred_label).sum(dim=-1).mean()*0.5
     return(loss_o)
+
+
+def smooth_pred(frms, smooth = [0.075,0.85,0.075]):
+
+    l,c = frms.shape
+    num_smooth = len(smooth)
+    pad_num = num_smooth//2
+    smoothed_pred = torch.zeros_like(frms).to(frms.device)
+    padd_pred_l = frms[0,:].view(1,c).repeat(pad_num,1)
+    padd_pred_r = frms[-1,:].view(1,c).repeat(pad_num,1)
+
+    frms_padded = torch.cat([padd_pred_l,frms,padd_pred_r],dim=0)
+
+    for idx in range(num_smooth):
+        smoothed_pred += smooth[idx]*frms_padded[idx:l+idx,:]
+    return (smoothed_pred)
+
+def compute_predictor_loss():
+    pass

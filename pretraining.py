@@ -5,11 +5,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Variable
 import numpy as np
+from tqdm import tqdm
 
 import utils.utils
 from evaluation.eval import ft_eval, ss_eval
 from model.memory import Memory
-from model.main_branch import WSTAL, random_walk
+from model.main_branch import WSTAL, random_walk, predictor_yololike
 from model.losses import NormalizedCrossEntropy, AttLoss, CategoryCrossEntropy
 from utils.video_dataloader import VideoDataset
 # from tensorboard_logger import Logger
@@ -27,7 +28,7 @@ class Processor():
         self.device = torch.device(
             'cuda:' + str(self.args.gpu_ids[0]) if torch.cuda.is_available() and len(self.args.gpu_ids) > 0 else 'cpu')
 
-        #
+
 
         # dataloader
         if self.args.dataset_name in ['Thumos14', 'Thumos14reduced']:
@@ -43,7 +44,6 @@ class Processor():
                 self.test_data_loader = torch.utils.data.DataLoader(VideoDataset(self.args, 'test'), batch_size=1,
                                                                     shuffle=False, drop_last=False,num_workers=0)
             elif self.args.run_type == 1:
-                #zhoujq
                 self.test_data_loader = torch.utils.data.DataLoader(VideoDataset(self.args, 'test'), batch_size=1,
                                                                     shuffle=False, drop_last=False,num_workers=0)
         else:
@@ -59,21 +59,25 @@ class Processor():
         self.memory = Memory(self.args).to(self.device)
         #distilation model setting by zhoujq
         self.dist_model = WSTAL(self.args).to(self.device)
+        # self.predictor = predictor_yololike(args)
 
         # Model Parallel Setting
         if len(self.args.gpu_ids) > 1:
             self.model = nn.DataParallel(self.model, device_ids=self.args.gpu_ids)
             self.model_module = self.model.module
 
-            # by zhoujq
             self.dist_model =  nn.DataParallel(self.dist_model, device_ids=self.args.gpu_ids)
             self.dist_model_module = self.dist_model.module
+            # self.predictor = nn.DataParallel(self.predictor, device_ids=self.args.gpu_ids)
+            # self.predictor_module = self.predictor.module
         else:
             self.model_module = self.model
             self.dist_model_module = self.dist_model
+            # self.predictor_module = self.predictor
+
 
         # Loading Pretrained Model
-        if self.args.pretrained:
+        if self.args.pretrained and self.args.load_epoch is not None:
             model_dir = './ckpt/' + self.args.dataset_name + '/' + str(self.args.model_id) + '/' + str(
                 self.args.load_epoch) + '.pkl'
             if os.path.isfile(model_dir):
@@ -81,12 +85,31 @@ class Processor():
             else:
                 raise ValueError('Do Not Exist This Pretrained File')
 
+        #load the new classifier
+        # state_dict = torch.load("./svd_para.pth")
+        # centers_1 = torch.load("./centers_ac.pkl")
+        # centers_2 = torch.load("./centers_wk.pkl")
+        # alpha = state_dict['alpha']
+        # beta = state_dict['beta']
+        # gamma = state_dict['gamma']
+        # U_c, S_c, V_c = torch.svd(centers_1, some=False, compute_uv=True)
+        # U_c_2, S_c_2, V_c_2 = torch.svd(centers_2, some=False, compute_uv=True)
+        #
+        # s_rescale = S_c*alpha
+        # classifier = U_c@(s_rescale[:,None]*V_c.t()[:21,:])
+        #
+        # s_rescale_2 = S_c_2 * beta
+        # classifier_2 = U_c_2 @ (s_rescale_2[:, None] * V_c_2.t()[:21, :])
+        #
+        # weight_norm = classifier*gamma+classifier_2*(1-gamma)
 
-        #ensure weights are the same in the beginning by zhoujq
+
+        # self.model.ac_center.data.copy_(weight_norm)
+
         self.update_model(polyak_factor=1.0)
-
-        # Optimizer Setting
-        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.args.lr, betas=[0.9, 0.99],
+        parameters = [{"params": self.model.parameters()}]
+        # parameters = self.model.parameters()
+        self.optimizer = torch.optim.Adam(parameters, lr=self.args.lr, betas=[0.9, 0.99],
                                             weight_decay=self.args.weight_decay)
 
         # Optimizer Parallel Setting
@@ -112,7 +135,7 @@ class Processor():
         print('Start training!')
         self.model_module.train(mode=True)
 
-        if self.args.pretrained:
+        if self.args.pretrained and self.args.load_epoch is not None:
             epoch_range = range(self.args.load_epoch, self.args.max_epoch)
         else:
             epoch_range = range(self.args.max_epoch)
@@ -121,16 +144,16 @@ class Processor():
         step = 0
         current_lr = self.args.lr
 
-        #by zhoujq
         loss_recorder = {
             'cls_fore': 0,
             'cls_back': 0,
             'att': 0,
             'spl': 0,
-            'match': 0,
-            'KD': 0,
         }
+
+
         for epoch in epoch_range:
+
             for num, sample in enumerate(self.train_data_loader):
                 if self.args.decay_type == 0:
                     for param_group in self.optimizer_module.param_groups:
@@ -138,8 +161,8 @@ class Processor():
                 elif self.args.decay_type == 1:
                     if num == 0:
                         current_lr = self.Step_decay_lr(epoch)
-                        for param_group in self.optimizer_module.param_groups:
-                            param_group['lr'] = current_lr
+                    for param_group in self.optimizer_module.param_groups:
+                        param_group['lr'] = current_lr
                 elif self.args.decay_type == 2:
                     current_lr = self.Cosine_decay_lr(epoch, num)
                     for param_group in self.optimizer_module.param_groups:
@@ -156,23 +179,15 @@ class Processor():
                 b_labels = torch.cat([labels, torch.ones(labels.size(0), 1).to(self.device)], -1)
 
                 o_out, m_out, em_out = self.model(features)
+                # with torch.no_grad():
+                #     d_o_out, d_m_out, d_em_out = self.dist_model(features)
 
-                #compute the prediction of the distilation model by zhoujq
-                with torch.no_grad():
-                    d_o_out, d_m_out, d_em_out = self.dist_model(features)
-                #compute the self distlation psuedo label
-                pred_label = utils.utils.fuse_current_pred(d_o_out, d_m_out, d_em_out, f_labels, self.args)
-
-                #compute the distilation loss by zhoujq
-                loss_dist = utils.utils.compute_distloss(o_out, m_out, em_out, pred_label,self.args)
 
                 if self.args.use_foreloss==1:
-                    #zhoujq
-                    # f_labels_new = f_labels*2+b_labels
-                    f_labels_new = f_labels
-                    vid_fore_loss = self.loss_nce(o_out[0], f_labels_new) + self.loss_nce(m_out[0], f_labels_new)
+                    vid_fore_loss = self.loss_nce(o_out[0], f_labels) + self.loss_nce(m_out[0], f_labels)
                 else:
                     vid_fore_loss = torch.tensor(0).to(self.device)
+
                 if self.args.use_backloss==1:
                     vid_back_loss = self.loss_nce(o_out[1], b_labels) + self.loss_nce(m_out[1], b_labels)
                 else:
@@ -197,23 +212,15 @@ class Processor():
                 else:
                     vid_spl_loss = self.loss_spl(o_out[3], m_out[3])
 
-                #compute the constrained cluster loss
-                scores = utils.utils.compute_score_matrix(features)
-                threshhold = [float(it) for it in self.args.threshhold]
-                pred_score = utils.utils.compute_action_labels(scores,labels,threshhold)
-                pred_model = torch.log_softmax(o_out[3] / self.args.T, -1)
-                loss_matching = (-pred_model*pred_score).sum(dim=-1).mean()
+
 
                 total_loss = vid_fore_loss*self.args.fore_loss_weight + vid_back_loss * self.args.back_loss_weight \
-                + vid_att_loss * self.args.att_loss_weight + vid_spl_loss * self.args.spl_loss_weight \
-                + self.args.match_loss*loss_matching + self.args.dist_loss*loss_dist
+                + vid_att_loss * self.args.att_loss_weight + vid_spl_loss * self.args.spl_loss_weight
 
                 loss_recorder['cls_fore'] += vid_fore_loss.item()
                 loss_recorder['cls_back'] += vid_back_loss.item()
                 loss_recorder['att'] += vid_att_loss.item()
                 loss_recorder['spl'] += vid_spl_loss.item()
-                loss_recorder['match'] += loss_matching.item()
-                loss_recorder['KD'] += loss_dist.item()
                 total_loss.backward()
 
                 if iter % self.args.batch_size == 0:
@@ -236,7 +243,8 @@ class Processor():
                 mu_queue, sc_queue, lbl_queue = ft_eval(self.train_data_loader_tmp, self.model_module, self.args, self.device)
                 self.memory._init_queue(mu_queue, sc_queue, lbl_queue)
                 self.model_module.train()
-                self.args.lambda_s = 0.5
+                self.args.spl_loss_weight = 0.5
+
 
             if (epoch + 1) % self.args.save_interval == 0:
                 out_dir = './ckpt/' + self.args.dataset_name + '/' + str(self.args.model_id) + '/' + str(
@@ -245,9 +253,9 @@ class Processor():
                 self.model_module.eval()
                 ss_eval(epoch + 1, self.test_data_loader, self.args, self.logger, self.model_module, self.device)
                 self.model_module.train()
-            if (epoch + 1) % 10 == 0:
-                #update the current dist model every 10 epoch
-                self.update_model(polyak_factor=0.01)
+
+
+
 
     def val(self, epoch):
         print('Start testing!')

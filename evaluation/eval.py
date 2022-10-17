@@ -22,8 +22,8 @@ def ft_eval(dataloader, model, args, device):
         if (num + 1) % 100 == 0:
             print('Testing test data point %d of %d' % (num + 1, len(dataloader)))
 
-        label = sample['labels'].numpy()
-        features = sample['data'].numpy()
+        label = sample[1].numpy()
+        features = sample[0].numpy()
         
         features = torch.from_numpy(features).float().to(device)
         with torch.no_grad():
@@ -44,20 +44,31 @@ def ss_eval(epoch, dataloader, args, logger, model, device):
     vid_lens = []
     labels = []
     # model.eval()
+    #smoth filter
+
+
+
     for num, sample in enumerate(dataloader):
         if (num + 1) % 100 == 0:
             print('Testing test data point %d of %d' % (num + 1, len(dataloader)))
 
-        features = sample['data'].numpy()
-        label = sample['labels'].numpy()
-        vid_len = sample['vid_len'].numpy()
+        features = sample[1].numpy()
+        label = sample[2].numpy()
+        vid_len = sample[3].numpy()
 
         features = torch.from_numpy(features).float().to(device)
         cls_atts = []
+
+
         with torch.no_grad():
-            o_out, m_out, _ = model(Variable(features))
+            o_out, m_out, mu_out = model(Variable(features))
             vid_pred = o_out[0] * 0.6 + m_out[0] * 0.4
-            frm_pred = F.softmax(o_out[3], -1) *args.frm_coef + F.softmax(m_out[3], -1) * (1-args.frm_coef)
+            #sharpen the prediction value
+            frm_pred_ori = F.softmax(o_out[3], -1) *args.frm_coef + F.softmax(m_out[3], -1) * (1-args.frm_coef)
+            #converted predictions
+            # frm_pred = utils.compute_weighted_prediction(vid_pred[0].detach().cpu().numpy(),
+            #                                              frm_pred_ori[0].detach().cpu().numpy(),args).to(frm_pred_ori.device)
+            frm_pred = frm_pred_ori
             vid_att = o_out[2]
 
             frm_pred = frm_pred * vid_att[..., None]
